@@ -38,6 +38,11 @@
 #endif
 #endif
 
+/* Statistical profiler: implied by TRACING for the time being */
+#if defined(TRACING)
+#define STAT_PROFILE
+#endif
+
 #if defined(STAT_PROFILE)
 #define STAT_PROFILE_HEAP_SAMPLE_BUFFER_SIZE 4096
 #define STAT_PROFILE_BLACKHOLE_SAMPLE_BUFFER_SIZE 4096
