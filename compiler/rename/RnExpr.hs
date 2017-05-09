@@ -1632,6 +1632,11 @@ stmtTreeToStmts monad_names ctxt (StmtTreeOne (L _ (BindStmt pat rhs _ _ _),_))
     --          isIrrefuatableHsPat
   = mkApplicativeStmt ctxt [ApplicativeArgOne pat rhs] False tail'
 
+stmtTreeToStmts monad_names ctxt (StmtTreeOne (L _ (BodyStmt rhs _ _ _),_))
+                tail _tail_fvs
+  | (False, tail') <- needJoin monad_names tail
+  = mkApplicativeStmt ctxt [ApplicativeArgOne nlWildPatName rhs] False tail'
+
 stmtTreeToStmts _monad_names _ctxt (StmtTreeOne (s,_)) tail _tail_fvs =
   return (s : tail, emptyNameSet)
 
@@ -1650,6 +1655,8 @@ stmtTreeToStmts monad_names ctxt (StmtTreeApplicative trees) tail tail_fvs = do
  where
    stmtTreeArg _ctxt _tail_fvs (StmtTreeOne (L _ (BindStmt pat exp _ _ _), _)) =
      return (ApplicativeArgOne pat exp, emptyFVs)
+   stmtTreeArg _ctxt _tail_fvs (StmtTreeOne (L _ (BodyStmt exp _ _ _), _)) =
+     return (ApplicativeArgOne nlWildPatName exp, emptyFVs)
    stmtTreeArg ctxt tail_fvs tree = do
      let stmts = flattenStmtTree tree
          pvarset = mkNameSet (concatMap (collectStmtBinders.unLoc.fst) stmts)
@@ -1755,6 +1762,13 @@ slurpIndependentStmts stmts = go [] [] emptyNameSet stmts
     = go lets ((L loc (BindStmt pat body bind_op fail_op ty), fvs) : indep)
          bndrs' rest
     where bndrs' = bndrs `unionNameSet` mkNameSet (collectPatBinders pat)
+  -- Likewise with BodyStmt
+  go lets indep bndrs ((L loc (BodyStmt body then_op guard_op ty), fvs) : rest)
+    | isEmptyNameSet (bndrs `intersectNameSet` fvs)
+    = go lets ((L loc (BodyStmt body then_op guard_op ty), fvs) : indep)
+         bndrs' rest
+    where pat = nlWildPatName
+          bndrs' = bndrs `unionNameSet` mkNameSet (collectPatBinders pat)
   -- If we encounter a LetStmt that doesn't depend on a BindStmt in this
   -- group, then move it to the beginning, so that it doesn't interfere with
   -- grouping more BindStmts.
