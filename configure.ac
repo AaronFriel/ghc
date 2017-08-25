@@ -113,6 +113,17 @@ AC_ARG_ENABLE(tarballs-autodownload,
         TarballsAutodownload=NO
 )
 
+AC_ARG_ENABLE(distro-toolchain,
+[AC_HELP_STRING([--enable-distro-toolchain],
+                [Do not use bundled Windows toolchain binaries.])],
+        EnableDistroToolchain=YES,
+        EnableDistroToolchain=NO
+)
+
+if test "$EnableDistroToolchain" = "YES"; then
+  TarballsAutodownload=NO
+fi
+
 dnl CC_STAGE0 is like the "previous" variable CC (inherited by CC_STAGE[123])
 dnl but instead used by stage0 for bootstrapping stage1
 AC_ARG_VAR(CC_STAGE0, [C compiler command (bootstrap)])
@@ -147,8 +158,8 @@ if test "$WithGhc" = ""
 then
     AC_MSG_ERROR([GHC is required.])
 fi
-FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.10],
-    [AC_MSG_ERROR([GHC version 7.10 or later is required to compile GHC.])])
+FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[8.0],
+    [AC_MSG_ERROR([GHC version 8.0 or later is required to compile GHC.])])
 
 if test `expr $GhcMinVersion % 2` = "1"
 then
@@ -365,7 +376,7 @@ set_up_tarballs() {
     fi
 }
 
-if test "$HostOS" = "mingw32"
+if test "$HostOS" = "mingw32" -a "$EnableDistroToolchain" = "NO"
 then
     test -d inplace || mkdir inplace
 
@@ -394,6 +405,28 @@ then
         AC_MSG_NOTICE([In-tree perl tree created])
     fi
 fi
+
+# We don't want to bundle a MinGW-w64 toolchain
+# So we have to find these individual tools.
+if test "$EnableDistroToolchain" = "YES"
+then
+    # Ideally should use AC_CHECK_TARGET_TOOL but our triples
+    # are screwed up. Configure doesn't think they're ever equal and
+    # so never tried without the prefix.
+    AC_PATH_PROG([CC],[gcc], [clang])
+    AC_PATH_PROG([NM],[nm])
+    AC_PATH_PROG([AR],[ar])
+    AC_PATH_PROG([RANLIB],[ranlib])
+    AC_PATH_PROG([OBJDUMP],[objdump])
+    AC_PATH_PROG([DllWrap],[dllwrap])
+    AC_PATH_PROG([Windres],[windres])
+fi
+
+DllWrapCmd="$DllWrap"
+WindresCmd="$Windres"
+
+AC_SUBST([DllWrapCmd])
+AC_SUBST([WindresCmd])
 
 FP_ICONV
 FP_GMP
@@ -461,6 +494,7 @@ fi
 AC_SUBST(CrossCompiling)
 AC_SUBST(CrossCompilePrefix)
 AC_SUBST(TargetPlatformFull)
+AC_SUBST(EnableDistroToolchain)
 
 dnl ** Which gcc to use?
 dnl --------------------------------------------------------------
@@ -495,9 +529,13 @@ FP_SET_CFLAGS_C99([CC_STAGE0],[CONF_CC_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 
-dnl ** Which ld to use?
+dnl ** Choose a linker
 dnl --------------------------------------------------------------
-FIND_LD([LdCmd])
+FIND_LD([$target],[GccUseLdOpt])
+CONF_GCC_LINKER_OPTS_STAGE1="$CONF_GCC_LINKER_OPTS_STAGE1 $GccUseLdOpt"
+CONF_GCC_LINKER_OPTS_STAGE2="$CONF_GCC_LINKER_OPTS_STAGE2 $GccUseLdOpt"
+LdCmd="$LD"
+CFLAGS="$CFLAGS $GccUseLdOpt"
 AC_SUBST([LdCmd])
 
 dnl ** Which nm to use?
@@ -538,9 +576,10 @@ fi
 
 dnl ** Which objdump to use?
 dnl --------------------------------------------------------------
-dnl Note: we may not have objdump on OS X, and we only need it on Windows (for DLL checks)
+dnl Note: we may not have objdump on OS X, and we only need it on
+dnl Windows (for DLL checks), OpenBSD, and AIX
 case $HostOS_CPP in
-  cygwin32|mingw32)
+  cygwin32|mingw32|openbsd|aix)
     AC_CHECK_TARGET_TOOL([OBJDUMP], [objdump])
     ;;
 esac
@@ -569,12 +608,17 @@ fi
 RanlibCmd="$RANLIB"
 RANLIB="$RanlibCmd"
 
+dnl ** which libtool to use?
+dnl --------------------------------------------------------------
+AC_CHECK_TARGET_TOOL([LIBTOOL], [libtool])
+LibtoolCmd="$LIBTOOL"
+LIBTOOL="$LibtoolCmd"
 
 # Here is where we re-target which specific version of the LLVM
 # tools we are looking for. In the past, GHC supported a number of
 # versions of LLVM simultaneously, but that stopped working around
 # 3.5/3.6 release of LLVM.
-LlvmVersion=3.9
+LlvmVersion=4.0
 AC_SUBST([LlvmVersion])
 sUPPORTED_LLVM_VERSION=$(echo \($LlvmVersion\) | sed 's/\./,/')
 AC_DEFINE_UNQUOTED([sUPPORTED_LLVM_VERSION], ${sUPPORTED_LLVM_VERSION}, [The supported LLVM version number])
@@ -616,7 +660,11 @@ SplitObjsBroken=NO
 dnl ** look for `perl'
 case $HostOS_CPP in
 cygwin32|mingw32)
-  PerlCmd=$hardtop/inplace/perl/perl
+  if test "$EnableDistroToolchain" = "NO"; then
+    PerlCmd=$hardtop/inplace/perl/perl
+  else
+    AC_PATH_PROG([PerlCmd],[perl])
+  fi
   ;;
 *)
     AC_PATH_PROG([PerlCmd],[perl])
@@ -648,7 +696,6 @@ FP_PROG_LD_IS_GNU
 FP_PROG_LD_BUILD_ID
 FP_PROG_LD_NO_COMPACT_UNWIND
 FP_PROG_LD_FILELIST
-
 
 FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS],[IGNORE_LINKER_LD_FLAGS],[CPPFLAGS])
 FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_GCC_LINKER_OPTS_STAGE0],[CONF_LD_LINKER_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
@@ -828,8 +875,8 @@ FP_CHECK_SIZEOF_AND_ALIGNMENT(uint64_t)
 
 
 dnl for use in settings.in
-WordSize=$ac_cv_sizeof_void_p
-AC_SUBST(WordSize)
+TargetWordSize=$ac_cv_sizeof_void_p
+AC_SUBST(TargetWordSize)
 FP_CHECK_FUNC([WinExec],
   [@%:@include <windows.h>], [WinExec("",0)])
 
@@ -1202,7 +1249,7 @@ checkMake380() {
 checkMake380 make
 checkMake380 gmake
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt utils/mkUserGuidePart/mkUserGuidePart.cabal distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
 AC_OUTPUT
 [
 if test "$print_make_warning" = "true"; then
@@ -1250,10 +1297,11 @@ echo "\
    ar           : $ArCmd
    ld           : $LdCmd
    nm           : $NmCmd
+   libtool      : $LibtoolCmd
    objdump      : $ObjdumpCmd
    ranlib       : $RanlibCmd
-   windres      : $Windres
-   dllwrap      : $DllWrap
+   windres      : $WindresCmd
+   dllwrap      : $DllWrapCmd
    Happy        : $HappyCmd ($HappyVersion)
    Alex         : $AlexCmd ($AlexVersion)
    Perl         : $PerlCmd

@@ -46,7 +46,8 @@ import Cmm
 import CmmUtils
 import CmmSwitch
 import CLabel
-import Hoopl
+import Hoopl.Block
+import Hoopl.Graph
 
 -- The rest:
 import OrdList
@@ -1597,7 +1598,7 @@ genCCall' dflags gcp target dest_regs args
         uses_pic_base_implicitly = do
             -- See Note [implicit register in PPC PIC code]
             -- on why we claim to use PIC register here
-            when (gopt Opt_PIC dflags && target32Bit platform) $ do
+            when (positionIndependent dflags && target32Bit platform) $ do
                 _ <- getPicBaseNat $ archWordFormat True
                 return ()
 
@@ -1949,7 +1950,7 @@ genSwitch dflags expr targets
                     ]
         return code
 
-  | (gopt Opt_PIC dflags) || (not $ target32Bit $ targetPlatform dflags)
+  | (positionIndependent dflags) || (not $ target32Bit $ targetPlatform dflags)
   = do
         (reg,e_code) <- getSomeReg (cmmOffset dflags expr offset)
         let fmt = archWordFormat $ target32Bit $ targetPlatform dflags
@@ -1987,7 +1988,7 @@ generateJumpTableForInstr :: DynFlags -> Instr
                           -> Maybe (NatCmmDecl CmmStatics Instr)
 generateJumpTableForInstr dflags (BCTR ids (Just lbl)) =
     let jumpTable
-            | (gopt Opt_PIC dflags)
+            | (positionIndependent dflags)
               || (not $ target32Bit $ targetPlatform dflags)
             = map jumpTableEntryRel ids
             | otherwise = map (jumpTableEntry dflags) ids

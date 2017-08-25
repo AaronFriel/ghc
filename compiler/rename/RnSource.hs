@@ -5,6 +5,8 @@
 -}
 
 {-# LANGUAGE CPP, ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module RnSource (
         rnSrcDecls, addTcgDUs, findSplice
@@ -61,7 +63,9 @@ import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
 import Control.Arrow ( first )
-import Data.List ( sortBy, mapAccumL )
+import Data.List ( mapAccumL )
+import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty ( NonEmpty(..) )
 import Data.Maybe ( isJust )
 import qualified Data.Set as Set ( difference, fromList, toList, null )
 
@@ -81,7 +85,7 @@ It also does the following error checks:
 Brings the binders of the group into scope in the appropriate places;
 does NOT assume that anything is in scope already
 -}
-rnSrcDecls :: HsGroup RdrName -> RnM (TcGblEnv, HsGroup Name)
+rnSrcDecls :: HsGroup GhcPs -> RnM (TcGblEnv, HsGroup GhcRn)
 -- Rename a top-level HsGroup; used for normal source files *and* hs-boot files
 rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
                             hs_splcds  = splice_decls,
@@ -266,7 +270,7 @@ rnDocDecl (DocGroup lev doc) = do
 *********************************************************
 -}
 
-rnSrcFixityDecls :: NameSet -> [LFixitySig RdrName] -> RnM [LFixitySig Name]
+rnSrcFixityDecls :: NameSet -> [LFixitySig GhcPs] -> RnM [LFixitySig GhcRn]
 -- Rename the fixity decls, so we can put
 -- the renamed decls in the renamed syntax tree
 -- Errors if the thing being fixed is not defined locally.
@@ -279,7 +283,7 @@ rnSrcFixityDecls bndr_set fix_decls
   where
     sig_ctxt = TopSigCtxt bndr_set
 
-    rn_decl :: LFixitySig RdrName -> RnM [LFixitySig Name]
+    rn_decl :: LFixitySig GhcPs -> RnM [LFixitySig GhcRn]
         -- GHC extension: look up both the tycon and data con
         -- for con-like things; hence returning a list
         -- If neither are in scope, report an error; otherwise
@@ -312,13 +316,13 @@ gather them together.
 -}
 
 -- checks that the deprecations are defined locally, and that there are no duplicates
-rnSrcWarnDecls :: NameSet -> [LWarnDecls RdrName] -> RnM Warnings
+rnSrcWarnDecls :: NameSet -> [LWarnDecls GhcPs] -> RnM Warnings
 rnSrcWarnDecls _ []
   = return NoWarnings
 
 rnSrcWarnDecls bndr_set decls'
   = do { -- check for duplicates
-       ; mapM_ (\ dups -> let (L loc rdr:lrdr':_) = dups
+       ; mapM_ (\ dups -> let (L loc rdr :| (lrdr':_)) = dups
                           in addErrAt loc (dupWarnDecl lrdr' rdr))
                warn_rdr_dups
        ; pairs_s <- mapM (addLocM rn_deprec) decls
@@ -339,7 +343,7 @@ rnSrcWarnDecls bndr_set decls'
    warn_rdr_dups = findDupRdrNames $ concatMap (\(L _ (Warning ns _)) -> ns)
                                                decls
 
-findDupRdrNames :: [Located RdrName] -> [[Located RdrName]]
+findDupRdrNames :: [Located RdrName] -> [NonEmpty (Located RdrName)]
 findDupRdrNames = findDupsEq (\ x -> \ y -> rdrNameOcc (unLoc x) == rdrNameOcc (unLoc y))
 
 -- look for duplicates among the OccNames;
@@ -360,7 +364,7 @@ dupWarnDecl (L loc _) rdr_name
 *********************************************************
 -}
 
-rnAnnDecl :: AnnDecl RdrName -> RnM (AnnDecl Name, FreeVars)
+rnAnnDecl :: AnnDecl GhcPs -> RnM (AnnDecl GhcRn, FreeVars)
 rnAnnDecl ann@(HsAnnotation s provenance expr)
   = addErrCtxt (annCtxt ann) $
     do { (provenance', provenance_fvs) <- rnAnnProvenance provenance
@@ -369,7 +373,8 @@ rnAnnDecl ann@(HsAnnotation s provenance expr)
        ; return (HsAnnotation s provenance' expr',
                  provenance_fvs `plusFV` expr_fvs) }
 
-rnAnnProvenance :: AnnProvenance RdrName -> RnM (AnnProvenance Name, FreeVars)
+rnAnnProvenance :: AnnProvenance RdrName
+                -> RnM (AnnProvenance Name, FreeVars)
 rnAnnProvenance provenance = do
     provenance' <- traverse lookupTopBndrRn provenance
     return (provenance', maybe emptyFVs unitFV (annProvenanceName_maybe provenance'))
@@ -382,7 +387,7 @@ rnAnnProvenance provenance = do
 *********************************************************
 -}
 
-rnDefaultDecl :: DefaultDecl RdrName -> RnM (DefaultDecl Name, FreeVars)
+rnDefaultDecl :: DefaultDecl GhcPs -> RnM (DefaultDecl GhcRn, FreeVars)
 rnDefaultDecl (DefaultDecl tys)
   = do { (tys', fvs) <- rnLHsTypes doc_str tys
        ; return (DefaultDecl tys', fvs) }
@@ -397,7 +402,7 @@ rnDefaultDecl (DefaultDecl tys)
 *********************************************************
 -}
 
-rnHsForeignDecl :: ForeignDecl RdrName -> RnM (ForeignDecl Name, FreeVars)
+rnHsForeignDecl :: ForeignDecl GhcPs -> RnM (ForeignDecl GhcRn, FreeVars)
 rnHsForeignDecl (ForeignImport { fd_name = name, fd_sig_ty = ty, fd_fi = spec })
   = do { topEnv :: HscEnv <- getTopEnv
        ; name' <- lookupLocatedTopBndrRn name
@@ -452,7 +457,7 @@ patchCCallTarget unitId callTarget =
 *********************************************************
 -}
 
-rnSrcInstDecl :: InstDecl RdrName -> RnM (InstDecl Name, FreeVars)
+rnSrcInstDecl :: InstDecl GhcPs -> RnM (InstDecl GhcRn, FreeVars)
 rnSrcInstDecl (TyFamInstD { tfid_inst = tfi })
   = do { (tfi', fvs) <- rnTyFamInstDecl Nothing tfi
        ; return (TyFamInstD { tfid_inst = tfi' }, fvs) }
@@ -477,7 +482,7 @@ rnSrcInstDecl (ClsInstD { cid_inst = cid })
 --
 -- See also descriptions of 'checkCanonicalMonadInstances' and
 -- 'checkCanonicalMonoidInstances'
-checkCanonicalInstances :: Name -> LHsSigType Name -> LHsBinds Name -> RnM ()
+checkCanonicalInstances :: Name -> LHsSigType GhcRn -> LHsBinds GhcRn -> RnM ()
 checkCanonicalInstances cls poly_ty mbinds = do
     whenWOptM Opt_WarnNonCanonicalMonadInstances
         checkCanonicalMonadInstances
@@ -608,7 +613,7 @@ checkCanonicalInstances cls poly_ty mbinds = do
 
     -- | test whether MatchGroup represents a trivial \"lhsName = rhsName\"
     -- binding, and return @Just rhsName@ if this is the case
-    isAliasMG :: MatchGroup Name (LHsExpr Name) -> Maybe Name
+    isAliasMG :: MatchGroup GhcRn (LHsExpr GhcRn) -> Maybe Name
     isAliasMG MG {mg_alts = L _ [L _ (Match { m_pats = [], m_grhss = grhss })]}
         | GRHSs [L _ (GRHS [] body)] lbinds <- grhss
         , L _ EmptyLocalBinds <- lbinds
@@ -651,7 +656,7 @@ checkCanonicalInstances cls poly_ty mbinds = do
                        ]
 
     -- stolen from TcInstDcls
-    instDeclCtxt1 :: LHsSigType Name -> SDoc
+    instDeclCtxt1 :: LHsSigType GhcRn -> SDoc
     instDeclCtxt1 hs_inst_ty
       = inst_decl_ctxt (ppr (getLHsInstDeclHead hs_inst_ty))
 
@@ -660,7 +665,7 @@ checkCanonicalInstances cls poly_ty mbinds = do
                          2 (quotes doc <> text ".")
 
 
-rnClsInstDecl :: ClsInstDecl RdrName -> RnM (ClsInstDecl Name, FreeVars)
+rnClsInstDecl :: ClsInstDecl GhcPs -> RnM (ClsInstDecl GhcRn, FreeVars)
 rnClsInstDecl (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = mbinds
                            , cid_sigs = uprags, cid_tyfam_insts = ats
                            , cid_overlap_mode = oflag
@@ -710,15 +715,15 @@ rnClsInstDecl (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = mbinds
              --     to remove the context).
 
 rnFamInstDecl :: HsDocContext
-              -> Maybe (Name, [Name])   -- Nothing => not associated
+              -> Maybe (Name, [Name]) -- Nothing => not associated
                                         -- Just (cls,tvs) => associated,
                                         --   and gives class and tyvars of the
                                         --   parent instance delc
               -> Located RdrName
-              -> HsTyPats RdrName
+              -> HsTyPats GhcPs
               -> rhs
               -> (HsDocContext -> rhs -> RnM (rhs', FreeVars))
-              -> RnM (Located Name, HsTyPats Name, rhs', FreeVars)
+              -> RnM (Located Name, HsTyPats GhcRn, rhs', FreeVars)
 rnFamInstDecl doc mb_cls tycon (HsIB { hsib_body = pats }) payload rnPayload
   = do { tycon'   <- lookupFamInstName (fmap fst mb_cls) tycon
        ; let loc = case pats of
@@ -742,11 +747,11 @@ rnFamInstDecl doc mb_cls tycon (HsIB { hsib_body = pats }) payload rnPayload
 
                        -- Report unused binders on the LHS
                        -- See Note [Unused type variables in family instances]
-                    ; let groups :: [[Located RdrName]]
+                    ; let groups :: [NonEmpty (Located RdrName)]
                           groups = equivClasses cmpLocated $
                                    freeKiTyVarsAllVars pat_kity_vars_with_dups
                     ; tv_nms_dups <- mapM (lookupOccRn . unLoc) $
-                                     [ tv | (tv:_:_) <- groups ]
+                                     [ tv | (tv :| (_:_)) <- groups ]
                           -- Add to the used variables
                           --  a) any variables that appear *more than once* on the LHS
                           --     e.g.   F a Int a = Bool
@@ -789,16 +794,16 @@ rnFamInstDecl doc mb_cls tycon (HsIB { hsib_body = pats }) payload rnPayload
              -- type instance => use, hence addOneFV
 
 rnTyFamInstDecl :: Maybe (Name, [Name])
-                -> TyFamInstDecl RdrName
-                -> RnM (TyFamInstDecl Name, FreeVars)
+                -> TyFamInstDecl GhcPs
+                -> RnM (TyFamInstDecl GhcRn, FreeVars)
 rnTyFamInstDecl mb_cls (TyFamInstDecl { tfid_eqn = L loc eqn })
   = do { (eqn', fvs) <- rnTyFamInstEqn mb_cls eqn
        ; return (TyFamInstDecl { tfid_eqn = L loc eqn'
                                , tfid_fvs = fvs }, fvs) }
 
 rnTyFamInstEqn :: Maybe (Name, [Name])
-               -> TyFamInstEqn RdrName
-               -> RnM (TyFamInstEqn Name, FreeVars)
+               -> TyFamInstEqn GhcPs
+               -> RnM (TyFamInstEqn GhcRn, FreeVars)
 rnTyFamInstEqn mb_cls (TyFamEqn { tfe_tycon = tycon
                                 , tfe_pats  = pats
                                 , tfe_fixity = fixity
@@ -811,8 +816,8 @@ rnTyFamInstEqn mb_cls (TyFamEqn { tfe_tycon = tycon
                           , tfe_rhs   = rhs' }, fvs) }
 
 rnTyFamDefltEqn :: Name
-                -> TyFamDefltEqn RdrName
-                -> RnM (TyFamDefltEqn Name, FreeVars)
+                -> TyFamDefltEqn GhcPs
+                -> RnM (TyFamDefltEqn GhcRn, FreeVars)
 rnTyFamDefltEqn cls (TyFamEqn { tfe_tycon = tycon
                               , tfe_pats  = tyvars
                               , tfe_fixity = fixity
@@ -828,8 +833,8 @@ rnTyFamDefltEqn cls (TyFamEqn { tfe_tycon = tycon
     ctx = TyFamilyCtx tycon
 
 rnDataFamInstDecl :: Maybe (Name, [Name])
-                  -> DataFamInstDecl RdrName
-                  -> RnM (DataFamInstDecl Name, FreeVars)
+                  -> DataFamInstDecl GhcPs
+                  -> RnM (DataFamInstDecl GhcRn, FreeVars)
 rnDataFamInstDecl mb_cls (DataFamInstDecl { dfid_tycon = tycon
                                           , dfid_pats  = pats
                                           , dfid_fixity = fixity
@@ -846,18 +851,18 @@ rnDataFamInstDecl mb_cls (DataFamInstDecl { dfid_tycon = tycon
 
 -- Rename associated type family decl in class
 rnATDecls :: Name      -- Class
-          -> [LFamilyDecl RdrName]
-          -> RnM ([LFamilyDecl Name], FreeVars)
+          -> [LFamilyDecl GhcPs]
+          -> RnM ([LFamilyDecl GhcRn], FreeVars)
 rnATDecls cls at_decls
   = rnList (rnFamDecl (Just cls)) at_decls
 
-rnATInstDecls :: (Maybe (Name, [Name]) ->    -- The function that renames
-                  decl RdrName ->            -- an instance. rnTyFamInstDecl
-                  RnM (decl Name, FreeVars)) -- or rnDataFamInstDecl
+rnATInstDecls :: (Maybe (Name, [Name]) -> -- The function that renames
+                  decl GhcPs ->            -- an instance. rnTyFamInstDecl
+                  RnM (decl GhcRn, FreeVars)) -- or rnDataFamInstDecl
               -> Name      -- Class
               -> [Name]
-              -> [Located (decl RdrName)]
-              -> RnM ([Located (decl Name)], FreeVars)
+              -> [Located (decl GhcPs)]
+              -> RnM ([Located (decl GhcRn)], FreeVars)
 -- Used for data and type family defaults in a class decl
 -- and the family instance declarations in an instance
 --
@@ -954,14 +959,14 @@ Here 'k' is in scope in the kind signature, just like 'x'.
 *********************************************************
 -}
 
-rnSrcDerivDecl :: DerivDecl RdrName -> RnM (DerivDecl Name, FreeVars)
+rnSrcDerivDecl :: DerivDecl GhcPs -> RnM (DerivDecl GhcRn, FreeVars)
 rnSrcDerivDecl (DerivDecl ty deriv_strat overlap)
   = do { standalone_deriv_ok <- xoptM LangExt.StandaloneDeriving
        ; deriv_strats_ok     <- xoptM LangExt.DerivingStrategies
        ; unless standalone_deriv_ok (addErr standaloneDerivErr)
        ; failIfTc (isJust deriv_strat && not deriv_strats_ok) $
            illegalDerivStrategyErr $ fmap unLoc deriv_strat
-       ; (ty', fvs) <- rnLHsInstType (text "In a deriving declaration") ty
+       ; (ty', fvs) <- rnLHsInstType (text "a deriving declaration") ty
        ; return (DerivDecl ty' deriv_strat overlap, fvs) }
 
 standaloneDerivErr :: SDoc
@@ -977,12 +982,12 @@ standaloneDerivErr
 *********************************************************
 -}
 
-rnHsRuleDecls :: RuleDecls RdrName -> RnM (RuleDecls Name, FreeVars)
+rnHsRuleDecls :: RuleDecls GhcPs -> RnM (RuleDecls GhcRn, FreeVars)
 rnHsRuleDecls (HsRules src rules)
   = do { (rn_rules,fvs) <- rnList rnHsRuleDecl rules
        ; return (HsRules src rn_rules,fvs) }
 
-rnHsRuleDecl :: RuleDecl RdrName -> RnM (RuleDecl Name, FreeVars)
+rnHsRuleDecl :: RuleDecl GhcPs -> RnM (RuleDecl GhcRn, FreeVars)
 rnHsRuleDecl (HsRule rule_name act vars lhs _fv_lhs rhs _fv_rhs)
   = do { let rdr_names_w_loc = map get_var vars
        ; checkDupRdrNames rdr_names_w_loc
@@ -998,8 +1003,8 @@ rnHsRuleDecl (HsRule rule_name act vars lhs _fv_lhs rhs _fv_rhs)
     get_var (L _ (RuleBndrSig v _)) = v
     get_var (L _ (RuleBndr v)) = v
 
-bindHsRuleVars :: RuleName -> [LRuleBndr RdrName] -> [Name]
-               -> ([LRuleBndr Name] -> RnM (a, FreeVars))
+bindHsRuleVars :: RuleName -> [LRuleBndr GhcPs] -> [Name]
+               -> ([LRuleBndr GhcRn] -> RnM (a, FreeVars))
                -> RnM (a, FreeVars)
 bindHsRuleVars rule_name vars names thing_inside
   = go vars names $ \ vars' ->
@@ -1035,7 +1040,7 @@ lambdas.  So it seems simmpler not to check at all, and that is why
 check_e is commented out.
 -}
 
-checkValidRule :: FastString -> [Name] -> LHsExpr Name -> NameSet -> RnM ()
+checkValidRule :: FastString -> [Name] -> LHsExpr GhcRn -> NameSet -> RnM ()
 checkValidRule rule_name ids lhs' fv_lhs'
   = do  {       -- Check for the form of the LHS
           case (validRuleLhs ids lhs') of
@@ -1046,7 +1051,7 @@ checkValidRule rule_name ids lhs' fv_lhs'
         ; let bad_vars = [var | var <- ids, not (var `elemNameSet` fv_lhs')]
         ; mapM_ (addErr . badRuleVar rule_name) bad_vars }
 
-validRuleLhs :: [Name] -> LHsExpr Name -> Maybe (HsExpr Name)
+validRuleLhs :: [Name] -> LHsExpr GhcRn -> Maybe (HsExpr GhcRn)
 -- Nothing => OK
 -- Just e  => Not ok, and e is the offending sub-expression
 validRuleLhs foralls lhs
@@ -1084,7 +1089,7 @@ badRuleVar name var
          text "Forall'd variable" <+> quotes (ppr var) <+>
                 text "does not appear on left hand side"]
 
-badRuleLhsErr :: FastString -> LHsExpr Name -> HsExpr Name -> SDoc
+badRuleLhsErr :: FastString -> LHsExpr GhcRn -> HsExpr GhcRn -> SDoc
 badRuleLhsErr name lhs bad_e
   = sep [text "Rule" <+> pprRuleName name <> colon,
          nest 4 (vcat [err,
@@ -1104,7 +1109,7 @@ badRuleLhsErr name lhs bad_e
 *********************************************************
 -}
 
-rnHsVectDecl :: VectDecl RdrName -> RnM (VectDecl Name, FreeVars)
+rnHsVectDecl :: VectDecl GhcPs -> RnM (VectDecl GhcRn, FreeVars)
 -- FIXME: For the moment, the right-hand side is restricted to be a variable as we cannot properly
 --        typecheck a complex right-hand side without invoking 'vectType' from the vectoriser.
 rnHsVectDecl (HsVect s var rhs@(L _ (HsVar _)))
@@ -1286,8 +1291,8 @@ constructors] in TcEnv
 -}
 
 
-rnTyClDecls :: [TyClGroup RdrName]
-            -> RnM ([TyClGroup Name], FreeVars)
+rnTyClDecls :: [TyClGroup GhcPs]
+            -> RnM ([TyClGroup GhcRn], FreeVars)
 -- Rename the declarations and do dependency analysis on them
 rnTyClDecls tycl_ds
   = do { -- Rename the type/class, instance, and role declaraations
@@ -1332,9 +1337,9 @@ rnTyClDecls tycl_ds
        ; return (all_groups, all_fvs) }
   where
     mk_group :: (InstDeclFreeVarsMap, RoleAnnotEnv)
-             -> SCC (LTyClDecl Name)
+             -> SCC (LTyClDecl GhcRn)
              -> ( (InstDeclFreeVarsMap, RoleAnnotEnv)
-                , TyClGroup Name )
+                , TyClGroup GhcRn )
     mk_group (inst_map, role_env) scc
       = ((inst_map', role_env'), group)
       where
@@ -1348,13 +1353,13 @@ rnTyClDecls tycl_ds
 
 
 depAnalTyClDecls :: GlobalRdrEnv
-                 -> [(LTyClDecl Name, FreeVars)]
-                 -> [SCC (LTyClDecl Name)]
+                 -> [(LTyClDecl GhcRn, FreeVars)]
+                 -> [SCC (LTyClDecl GhcRn)]
 -- See Note [Dependency analysis of type, class, and instance decls]
 depAnalTyClDecls rdr_env ds_w_fvs
   = stronglyConnCompFromEdgedVerticesUniq edges
   where
-    edges :: [ Node Name (LTyClDecl Name) ]
+    edges :: [ Node Name (LTyClDecl GhcRn) ]
     edges = [ DigraphNode d (tcdName (unLoc d)) (map (getParent rdr_env) (nonDetEltsUniqSet fvs))
             | (d, fvs) <- ds_w_fvs ]
             -- It's OK to use nonDetEltsUFM here as
@@ -1469,21 +1474,24 @@ cannot infer a type to be polymorphically instantiated while we
 are inferring its kind), but no one has hollered about this (yet!)
 -}
 
-addBootDeps :: [(LTyClDecl Name, FreeVars)] -> RnM [(LTyClDecl Name, FreeVars)]
+addBootDeps :: [(LTyClDecl GhcRn, FreeVars)]
+            -> RnM [(LTyClDecl GhcRn, FreeVars)]
 -- See Note [Extra dependencies from .hs-boot files]
 addBootDeps ds_w_fvs
   = do { tcg_env <- getGblEnv
        ; let this_mod  = tcg_mod tcg_env
              boot_info = tcg_self_boot tcg_env
 
-             add_boot_deps :: [(LTyClDecl Name, FreeVars)] -> [(LTyClDecl Name, FreeVars)]
+             add_boot_deps :: [(LTyClDecl GhcRn, FreeVars)]
+                           -> [(LTyClDecl GhcRn, FreeVars)]
              add_boot_deps ds_w_fvs
                = case boot_info of
                      SelfBoot { sb_tcs = tcs } | not (isEmptyNameSet tcs)
                         -> map (add_one tcs) ds_w_fvs
                      _  -> ds_w_fvs
 
-             add_one :: NameSet -> (LTyClDecl Name, FreeVars) -> (LTyClDecl Name, FreeVars)
+             add_one :: NameSet -> (LTyClDecl GhcRn, FreeVars)
+                     -> (LTyClDecl GhcRn, FreeVars)
              add_one tcs pr@(decl,fvs)
                 | has_local_imports fvs = (decl, fvs `plusFV` tcs)
                 | otherwise             = pr
@@ -1505,8 +1513,8 @@ addBootDeps ds_w_fvs
 -- It is quite convenient to do both of these in the same place.
 -- See also Note [Role annotations in the renamer]
 rnRoleAnnots :: NameSet
-             -> [LRoleAnnotDecl RdrName]
-             -> RnM [LRoleAnnotDecl Name]
+             -> [LRoleAnnotDecl GhcPs]
+             -> RnM [LRoleAnnotDecl GhcRn]
 rnRoleAnnots tc_names role_annots
   = do {  -- Check for duplicates *before* renaming, to avoid
           -- lumping together all the unboundNames
@@ -1524,23 +1532,22 @@ rnRoleAnnots tc_names role_annots
                                           tycon
            ; return $ RoleAnnotDecl tycon' roles }
 
-dupRoleAnnotErr :: [LRoleAnnotDecl RdrName] -> RnM ()
-dupRoleAnnotErr [] = panic "dupRoleAnnotErr"
+dupRoleAnnotErr :: NonEmpty (LRoleAnnotDecl GhcPs) -> RnM ()
 dupRoleAnnotErr list
   = addErrAt loc $
     hang (text "Duplicate role annotations for" <+>
           quotes (ppr $ roleAnnotDeclName first_decl) <> colon)
-       2 (vcat $ map pp_role_annot sorted_list)
+       2 (vcat $ map pp_role_annot $ NE.toList sorted_list)
     where
-      sorted_list = sortBy cmp_annot list
-      (L loc first_decl : _) = sorted_list
+      sorted_list = NE.sortBy cmp_annot list
+      (L loc first_decl :| _) = sorted_list
 
       pp_role_annot (L loc decl) = hang (ppr decl)
                                       4 (text "-- written at" <+> ppr loc)
 
       cmp_annot (L loc1 _) (L loc2 _) = loc1 `compare` loc2
 
-orphanRoleAnnotErr :: LRoleAnnotDecl Name -> RnM ()
+orphanRoleAnnotErr :: LRoleAnnotDecl GhcRn -> RnM ()
 orphanRoleAnnotErr (L loc decl)
   = addErrAt loc $
     hang (text "Role annotation for a type previously declared:")
@@ -1594,13 +1601,13 @@ modules), we get better error messages, too.
 --   the tycon names that are both
 --     a) free in the instance declaration
 --     b) bound by this group of type/class/instance decls
-type InstDeclFreeVarsMap = [(LInstDecl Name, FreeVars)]
+type InstDeclFreeVarsMap = [(LInstDecl GhcRn, FreeVars)]
 
 -- | Construct an @InstDeclFreeVarsMap@ by eliminating any @Name@s from the
 --   @FreeVars@ which are *not* the binders of a @TyClDecl@.
 mkInstDeclFreeVarsMap :: GlobalRdrEnv
                       -> NameSet
-                      -> [(LInstDecl Name, FreeVars)]
+                      -> [(LInstDecl GhcRn, FreeVars)]
                       -> InstDeclFreeVarsMap
 mkInstDeclFreeVarsMap rdr_env tycl_bndrs inst_ds_fvs
   = [ (inst_decl, toParents rdr_env fvs `intersectFVs` tycl_bndrs)
@@ -1614,12 +1621,13 @@ mkInstDeclFreeVarsMap rdr_env tycl_bndrs inst_ds_fvs
 --              whose free vars are now defined
 --   instd_map' is the inst-decl map with 'tcs' removed from
 --               the free-var set
-getInsts :: [Name] -> InstDeclFreeVarsMap -> ([LInstDecl Name], InstDeclFreeVarsMap)
+getInsts :: [Name] -> InstDeclFreeVarsMap
+         -> ([LInstDecl GhcRn], InstDeclFreeVarsMap)
 getInsts bndrs inst_decl_map
   = partitionWith pick_me inst_decl_map
   where
-    pick_me :: (LInstDecl Name, FreeVars)
-            -> Either (LInstDecl Name) (LInstDecl Name, FreeVars)
+    pick_me :: (LInstDecl GhcRn, FreeVars)
+            -> Either (LInstDecl GhcRn) (LInstDecl GhcRn, FreeVars)
     pick_me (decl, fvs)
       | isEmptyNameSet depleted_fvs = Left decl
       | otherwise                   = Right (decl, depleted_fvs)
@@ -1632,8 +1640,8 @@ getInsts bndrs inst_decl_map
 *                                                       *
 ****************************************************** -}
 
-rnTyClDecl :: TyClDecl RdrName
-           -> RnM (TyClDecl Name, FreeVars)
+rnTyClDecl :: TyClDecl GhcPs
+           -> RnM (TyClDecl GhcRn, FreeVars)
 
 -- All flavours of type family declarations ("type family", "newtype family",
 -- and "data family"), both top level and (for an associated type)
@@ -1744,11 +1752,11 @@ rnTyClDecl (ClassDecl { tcdCtxt = context, tcdLName = lcls,
     cls_doc  = ClassDeclCtx lcls
 
 -- "type" and "type instance" declarations
-rnTySyn :: HsDocContext -> LHsType RdrName -> RnM (LHsType Name, FreeVars)
+rnTySyn :: HsDocContext -> LHsType GhcPs -> RnM (LHsType GhcRn, FreeVars)
 rnTySyn doc rhs = rnLHsType doc rhs
 
-rnDataDefn :: HsDocContext -> HsDataDefn RdrName
-           -> RnM ((HsDataDefn Name, NameSet), FreeVars)
+rnDataDefn :: HsDocContext -> HsDataDefn GhcPs
+           -> RnM ((HsDataDefn GhcRn, NameSet), FreeVars)
                 -- the NameSet includes all Names free in the kind signature
                 -- See Note [Complete user-supplied kind signatures]
 rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
@@ -1794,8 +1802,8 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
            ; (ds', fvs) <- mapFvRn (rnLHsDerivingClause deriv_strats_ok doc) ds
            ; return (L loc ds', fvs) }
 
-rnLHsDerivingClause :: Bool -> HsDocContext -> LHsDerivingClause RdrName
-                    -> RnM (LHsDerivingClause Name, FreeVars)
+rnLHsDerivingClause :: Bool -> HsDocContext -> LHsDerivingClause GhcPs
+                    -> RnM (LHsDerivingClause GhcRn, FreeVars)
 rnLHsDerivingClause deriv_strats_ok doc
                 (L loc (HsDerivingClause { deriv_clause_strategy = dcs
                                          , deriv_clause_tys = L loc' dct }))
@@ -1824,8 +1832,8 @@ multipleDerivClausesErr
 rnFamDecl :: Maybe Name -- Just cls => this FamilyDecl is nested
                         --             inside an *class decl* for cls
                         --             used for associated types
-          -> FamilyDecl RdrName
-          -> RnM (FamilyDecl Name, FreeVars)
+          -> FamilyDecl GhcPs
+          -> RnM (FamilyDecl GhcRn, FreeVars)
 rnFamDecl mb_cls (FamilyDecl { fdLName = tycon, fdTyVars = tyvars
                              , fdFixity = fixity
                              , fdInfo = info, fdResultSig = res_sig
@@ -1861,8 +1869,8 @@ rnFamDecl mb_cls (FamilyDecl { fdLName = tycon, fdTyVars = tyvars
 
 rnFamResultSig :: HsDocContext
                -> [Name]   -- kind variables already in scope
-               -> FamilyResultSig RdrName
-               -> RnM (FamilyResultSig Name, FreeVars)
+               -> FamilyResultSig GhcPs
+               -> RnM (FamilyResultSig GhcRn, FreeVars)
 rnFamResultSig _ _ NoSig
    = return (NoSig, emptyFVs)
 rnFamResultSig doc _ (KindSig kind)
@@ -1928,11 +1936,11 @@ rnFamResultSig doc kv_names (TyVarSig tvbndr)
 -- | Rename injectivity annotation. Note that injectivity annotation is just the
 -- part after the "|".  Everything that appears before it is renamed in
 -- rnFamDecl.
-rnInjectivityAnn :: LHsQTyVars Name            -- ^ Type variables declared in
+rnInjectivityAnn :: LHsQTyVars GhcRn           -- ^ Type variables declared in
                                                --   type family head
-                 -> LFamilyResultSig Name      -- ^ Result signature
-                 -> LInjectivityAnn RdrName    -- ^ Injectivity annotation
-                 -> RnM (LInjectivityAnn Name)
+                 -> LFamilyResultSig GhcRn     -- ^ Result signature
+                 -> LInjectivityAnn GhcPs      -- ^ Injectivity annotation
+                 -> RnM (LInjectivityAnn GhcRn)
 rnInjectivityAnn tvBndrs (L _ (TyVarSig resTv))
                  (L srcSpan (InjectivityAnn injFrom injTo))
  = do
@@ -2013,10 +2021,10 @@ badAssocRhs ns
                2 (text "All such variables must be bound on the LHS"))
 
 -----------------
-rnConDecls :: [LConDecl RdrName] -> RnM ([LConDecl Name], FreeVars)
+rnConDecls :: [LConDecl GhcPs] -> RnM ([LConDecl GhcRn], FreeVars)
 rnConDecls = mapFvRn (wrapLocFstM rnConDecl)
 
-rnConDecl :: ConDecl RdrName -> RnM (ConDecl Name, FreeVars)
+rnConDecl :: ConDecl GhcPs -> RnM (ConDecl GhcRn, FreeVars)
 rnConDecl decl@(ConDeclH98 { con_name = name, con_qvars = qtvs
                            , con_cxt = mcxt, con_details = details
                            , con_doc = mb_doc })
@@ -2050,8 +2058,8 @@ rnConDecl decl@(ConDeclH98 { con_name = name, con_qvars = qtvs
     cxt = maybe [] unLoc mcxt
     get_rdr_tvs tys = extractHsTysRdrTyVars (cxt ++ tys)
 
-    get_con_qtvs :: [LHsType RdrName]
-                 -> RnM ([Located RdrName], LHsQTyVars RdrName)
+    get_con_qtvs :: [LHsType GhcPs]
+                 -> RnM ([Located RdrName], LHsQTyVars GhcPs)
     get_con_qtvs arg_tys
       | Just tvs <- qtvs   -- data T = forall a. MkT (a -> a)
       = do { free_vars <- get_rdr_tvs arg_tys
@@ -2076,8 +2084,9 @@ rnConDecl decl@(ConDeclGADT { con_names = names, con_type = ty
 rnConDeclDetails
    :: Name
    -> HsDocContext
-   -> HsConDetails (LHsType RdrName) (Located [LConDeclField RdrName])
-   -> RnM (HsConDetails (LHsType Name) (Located [LConDeclField Name]), FreeVars)
+   -> HsConDetails (LHsType GhcPs) (Located [LConDeclField GhcPs])
+   -> RnM (HsConDetails (LHsType GhcRn) (Located [LConDeclField GhcRn]),
+           FreeVars)
 rnConDeclDetails _ doc (PrefixCon tys)
   = do { (new_tys, fvs) <- rnLHsTypes doc tys
        ; return (PrefixCon new_tys, fvs) }
@@ -2098,7 +2107,7 @@ rnConDeclDetails con doc (RecCon (L l fields))
 
 -- | Brings pattern synonym names and also pattern synonym selectors
 -- from record pattern synonyms into scope.
-extendPatSynEnv :: HsValBinds RdrName -> MiniFixityEnv
+extendPatSynEnv :: HsValBinds GhcPs -> MiniFixityEnv
                 -> ([Name] -> TcRnIf TcGblEnv TcLclEnv a) -> TcM a
 extendPatSynEnv val_decls local_fix_env thing = do {
      names_with_fls <- new_ps val_decls
@@ -2111,11 +2120,11 @@ extendPatSynEnv val_decls local_fix_env thing = do {
          final_gbl_env = gbl_env { tcg_field_env = field_env' }
    ; setEnvs (final_gbl_env, lcl_env) (thing pat_syn_bndrs) }
   where
-    new_ps :: HsValBinds RdrName -> TcM [(Name, [FieldLabel])]
+    new_ps :: HsValBinds GhcPs -> TcM [(Name, [FieldLabel])]
     new_ps (ValBindsIn binds _) = foldrBagM new_ps' [] binds
     new_ps _ = panic "new_ps"
 
-    new_ps' :: LHsBindLR RdrName RdrName
+    new_ps' :: LHsBindLR GhcPs GhcPs
             -> [(Name, [FieldLabel])]
             -> TcM [(Name, [FieldLabel])]
     new_ps' bind names
@@ -2124,7 +2133,7 @@ extendPatSynEnv val_decls local_fix_env thing = do {
       = do
           bnd_name <- newTopSrcBinder (L bind_loc n)
           let rnames = map recordPatSynSelectorId as
-              mkFieldOcc :: Located RdrName -> LFieldOcc RdrName
+              mkFieldOcc :: Located RdrName -> LFieldOcc GhcPs
               mkFieldOcc (L l name) = L l (FieldOcc (L l name) PlaceHolder)
               field_occs =  map mkFieldOcc rnames
           flds     <- mapM (newRecordSelector False [bnd_name]) field_occs
@@ -2175,18 +2184,19 @@ Template Haskell splice.  As it does so it
         b) runs any top-level quasi-quotes
 -}
 
-findSplice :: [LHsDecl RdrName] -> RnM (HsGroup RdrName, Maybe (SpliceDecl RdrName, [LHsDecl RdrName]))
+findSplice :: [LHsDecl GhcPs]
+           -> RnM (HsGroup GhcPs, Maybe (SpliceDecl GhcPs, [LHsDecl GhcPs]))
 findSplice ds = addl emptyRdrGroup ds
 
-addl :: HsGroup RdrName -> [LHsDecl RdrName]
-     -> RnM (HsGroup RdrName, Maybe (SpliceDecl RdrName, [LHsDecl RdrName]))
+addl :: HsGroup GhcPs -> [LHsDecl GhcPs]
+     -> RnM (HsGroup GhcPs, Maybe (SpliceDecl GhcPs, [LHsDecl GhcPs]))
 -- This stuff reverses the declarations (again) but it doesn't matter
 addl gp []           = return (gp, Nothing)
 addl gp (L l d : ds) = add gp l d ds
 
 
-add :: HsGroup RdrName -> SrcSpan -> HsDecl RdrName -> [LHsDecl RdrName]
-    -> RnM (HsGroup RdrName, Maybe (SpliceDecl RdrName, [LHsDecl RdrName]))
+add :: HsGroup GhcPs -> SrcSpan -> HsDecl GhcPs -> [LHsDecl GhcPs]
+    -> RnM (HsGroup GhcPs, Maybe (SpliceDecl GhcPs, [LHsDecl GhcPs]))
 
 -- #10047: Declaration QuasiQuoters are expanded immediately, without
 --         causing a group split

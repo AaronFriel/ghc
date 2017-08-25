@@ -4,11 +4,6 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE BangPatterns #-}
-#if __GLASGOW_HASKELL__ < 800
--- For CallStack business
-{-# LANGUAGE ImplicitParams #-}
-{-# LANGUAGE FlexibleContexts #-}
-#endif
 
 -- | Highly random utility functions
 --
@@ -36,9 +31,10 @@ module Util (
 
         foldl1', foldl2, count, all2,
 
-        lengthExceeds, lengthIs, lengthAtLeast,
+        lengthExceeds, lengthIs, lengthIsNot,
+        lengthAtLeast, lengthAtMost, lengthLessThan,
         listLengthCmp, atLength,
-        equalLength, compareLength, leLength,
+        equalLength, neLength, compareLength, leLength, ltLength,
 
         isSingleton, only, singleton,
         notNull, snocView,
@@ -123,12 +119,8 @@ module Util (
         hashString,
 
         -- * Call stacks
-#if MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
-        GHC.Stack.CallStack,
-#endif
         HasCallStack,
         HasDebugCallStack,
-        prettyCurrentCallStack,
 
         -- * Utils for flags
         OverridingBool(..),
@@ -146,7 +138,7 @@ import System.IO.Unsafe ( unsafePerformIO )
 import Data.List        hiding (group)
 
 import GHC.Exts
-import qualified GHC.Stack
+import GHC.Stack (HasCallStack)
 
 import Control.Applicative ( liftA2 )
 import Control.Monad    ( liftM )
@@ -494,6 +486,7 @@ lengthExceeds lst n
   | otherwise
   = atLength notNull False lst n
 
+-- | @(lengthAtLeast xs n) = (length xs >= n)@
 lengthAtLeast :: [a] -> Int -> Bool
 lengthAtLeast = atLength (const True) False
 
@@ -505,6 +498,24 @@ lengthIs lst n
   | otherwise
   = atLength null False lst n
 
+-- | @(lengthIsNot xs n) = (length xs /= n)@
+lengthIsNot :: [a] -> Int -> Bool
+lengthIsNot lst n
+  | n < 0 = True
+  | otherwise = atLength notNull True lst n
+
+-- | @(lengthAtMost xs n) = (length xs <= n)@
+lengthAtMost :: [a] -> Int -> Bool
+lengthAtMost lst n
+  | n < 0
+  = False
+  | otherwise
+  = atLength null True lst n
+
+-- | @(lengthLessThan xs n) == (length xs < n)@
+lengthLessThan :: [a] -> Int -> Bool
+lengthLessThan = atLength (const False) True
+
 listLengthCmp :: [a] -> Int -> Ordering
 listLengthCmp = atLength atLen atEnd
  where
@@ -514,9 +525,16 @@ listLengthCmp = atLength atLen atEnd
   atLen _      = GT
 
 equalLength :: [a] -> [b] -> Bool
+-- ^ True if length xs == length ys
 equalLength []     []     = True
 equalLength (_:xs) (_:ys) = equalLength xs ys
 equalLength _      _      = False
+
+neLength :: [a] -> [b] -> Bool
+-- ^ True if length xs /= length ys
+neLength []     []     = False
+neLength (_:xs) (_:ys) = neLength xs ys
+neLength _      _      = True
 
 compareLength :: [a] -> [b] -> Ordering
 compareLength []     []     = EQ
@@ -529,6 +547,13 @@ leLength :: [a] -> [b] -> Bool
 leLength xs ys = case compareLength xs ys of
                    LT -> True
                    EQ -> True
+                   GT -> False
+
+ltLength :: [a] -> [b] -> Bool
+-- ^ True if length xs < length ys
+ltLength xs ys = case compareLength xs ys of
+                   LT -> True
+                   EQ -> False
                    GT -> False
 
 ----------------------------
@@ -1334,33 +1359,11 @@ mulHi a b = fromIntegral (r `shiftR` 32)
    where r :: Int64
          r = fromIntegral a * fromIntegral b
 
--- | A compatibility wrapper for the @GHC.Stack.HasCallStack@ constraint.
-#if __GLASGOW_HASKELL__ >= 800
-type HasCallStack = GHC.Stack.HasCallStack
-#elif MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
-type HasCallStack = (?callStack :: GHC.Stack.CallStack)
--- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
-#else
-type HasCallStack = (() :: Constraint)
-#endif
-
 -- | A call stack constraint, but only when 'isDebugOn'.
 #if defined(DEBUG)
 type HasDebugCallStack = HasCallStack
 #else
 type HasDebugCallStack = (() :: Constraint)
-#endif
-
--- | Pretty-print the current callstack
-#if __GLASGOW_HASKELL__ >= 800
-prettyCurrentCallStack :: HasCallStack => String
-prettyCurrentCallStack = GHC.Stack.prettyCallStack GHC.Stack.callStack
-#elif MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
-prettyCurrentCallStack :: (?callStack :: GHC.Stack.CallStack) => String
-prettyCurrentCallStack = GHC.Stack.showCallStack ?callStack
-#else
-prettyCurrentCallStack :: HasCallStack => String
-prettyCurrentCallStack = "Call stack unavailable"
 #endif
 
 data OverridingBool

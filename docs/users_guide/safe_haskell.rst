@@ -273,11 +273,6 @@ Furthermore, we restrict the following features:
   this reason, the ``Data.Coerce`` module is also considered unsafe. We are
   hoping to find a better solution here in the future.
 
-- ``Data.Typeable`` — Hand crafted instances of the Typeable type class are not allowed
-  in Safe Haskell as this can easily be abused to unsafely coerce
-  between types. Derived instances (through the :ghc-flag:`-XDeriveDataTypeable`
-  extension) are still allowed.
-
 - ``GHC.Generics`` — Hand crafted instances of the ``Generic`` type class are
   not allowed in Safe Haskell. Such instances aren't strictly unsafe, but
   there is an important invariant that a ``Generic`` instance should adhere to
@@ -380,7 +375,7 @@ Safe Imports
 Safe Haskell enables a small extension to the usual import syntax of
 Haskell, adding a ``safe`` keyword:
 
-::
+.. code-block:: none
 
     impdecl -> import [safe] [qualified] modid [as modid] [impspec]
 
@@ -567,10 +562,10 @@ Trustworthy Requirements
 .. index::
    single: trustworthy
 
-Module authors using the :ghc-flag:`-XTrustworthy` language extension for a module ``M``
-should ensure that ``M``\'s public API (the symbols exposed by its export list)
-can't be used in an unsafe manner. This mean that symbols exported should
-respect type safety and referential transparency.
+Module authors using the :ghc-flag:`-XTrustworthy` language extension for a
+module ``M`` should ensure that ``M``\'s public API (the symbols exposed by its
+export list) can't be used in an unsafe manner. This mean that symbols exported
+should respect type safety and referential transparency.
 
 .. _safe-package-trust:
 
@@ -585,19 +580,30 @@ Several new options are available at the GHC command-line to specify the
 trust property of packages:
 
 .. ghc-flag:: -trust ⟨pkg⟩
+    :shortdesc: Expose package ⟨pkg⟩ and set it to be trusted. See
+        :ref:`safe-haskell`.
+    :type: dynamic/ ``:set``
+    :category:
 
-   Exposes package ⟨pkg⟩ if it was hidden and considers it a
-   trusted package regardless of the package database.
+    Exposes package ⟨pkg⟩ if it was hidden and considers it a
+    trusted package regardless of the package database.
 
 .. ghc-flag:: -distrust ⟨pkg⟩
+    :shortdesc: Expose package ⟨pkg⟩ and set it to be distrusted. See
+        :ref:`safe-haskell`.
+    :type: dynamic/ ``:set``
+    :category:
 
-   Exposes package ⟨pkg⟩ if it was hidden and considers it
-   an untrusted package regardless of the package database.
+    Exposes package ⟨pkg⟩ if it was hidden and considers it
+    an untrusted package regardless of the package database.
 
 .. ghc-flag:: -distrust-all-packages
+    :shortdesc: Distrust all packages by default. See :ref:`safe-haskell`.
+    :type: dynamic/ ``:set``
+    :category:
 
-   Considers all packages distrusted unless they are
-   explicitly set to be trusted by subsequent command-line options.
+    Considers all packages distrusted unless they are
+    explicitly set to be trusted by subsequent command-line options.
 
 To set a package's trust property in the package database please refer
 to :ref:`packages`.
@@ -652,6 +658,9 @@ Safe Haskell Flag Summary
 In summary, Safe Haskell consists of the following three language flags:
 
 .. ghc-flag:: -XSafe
+    :shortdesc: Enable the :ref:`Safe Haskell <safe-haskell>` Safe mode.
+    :type: dynamic
+    :category:
 
     :since: 7.2.1
 
@@ -667,6 +676,9 @@ In summary, Safe Haskell consists of the following three language flags:
     - *Imported Modules* — All forced to be safe imports, all must be trusted.
 
 .. ghc-flag:: -XTrustworthy
+    :shortdesc: Enable the :ref:`Safe Haskell <safe-haskell>` Trustworthy mode.
+    :type: dynamic
+    :category:
 
     :since: 7.2.1
 
@@ -688,6 +700,9 @@ In summary, Safe Haskell consists of the following three language flags:
       trusted.
 
 .. ghc-flag:: -XUnsafe
+    :shortdesc: Enable :ref:`Safe Haskell <safe-haskell>` Unsafe mode.
+    :type: dynamic
+    :category:
 
     :since: 7.4.1
 
@@ -704,6 +719,11 @@ In summary, Safe Haskell consists of the following three language flags:
 And one general flag:
 
 .. ghc-flag:: -fpackage-trust
+    :shortdesc: Enable :ref:`Safe Haskell <safe-haskell>` trusted package
+        requirement for trustworthy modules.
+    :type: dynamic
+    :category:
+
     When enabled, turn on an extra check for a trustworthy module ``M``,
     requiring the package that ``M`` resides in be considered trusted, for ``M``
     to be considered trusted.
@@ -711,18 +731,33 @@ And one general flag:
 And three warning flags:
 
 .. ghc-flag:: -Wunsafe
+    :shortdesc: warn if the module being compiled is regarded to be unsafe.
+        See :ref:`safe-haskell`
+    :type: dynamic
+    :reverse: -Wno-unsafe
+    :category:
 
     Issue a warning if the module being compiled is regarded to be
     unsafe. Should be used to check the safety type of modules when
     using safe inference.
 
 .. ghc-flag:: -Wsafe
+    :shortdesc: warn if the module being compiled is regarded to be safe.
+    :type: dynamic
+    :reverse: -Wno-safe
+    :category:
 
     Issue a warning if the module being compiled is regarded to be safe.
     Should be used to check the safety type of modules when using safe
     inference.
 
 .. ghc-flag:: -Wtrustworthy-safe
+    :shortdesc: warn if the module being compiled is marked as
+        :ghc-flag:`-XTrustworthy` but it could instead be marked as
+        :ghc-flag:`-XSafe`, a more informative bound.
+    :type: dynamic
+    :reverse: -Wno-safe
+    :category:
 
     Issue a warning if the module being compiled is marked as
     -XTrustworthy but it could instead be marked as

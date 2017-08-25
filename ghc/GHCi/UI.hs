@@ -42,7 +42,7 @@ import GHCi
 import GHCi.RemoteTypes
 import GHCi.BreakArray
 import DynFlags
-import ErrUtils
+import ErrUtils hiding (traceCmd)
 import GhcMonad ( modifySession )
 import qualified GHC
 import GHC ( LoadHowMuch(..), Target(..),  TargetId(..), InteractiveImport(..),
@@ -51,7 +51,7 @@ import GHC ( LoadHowMuch(..), Target(..),  TargetId(..), InteractiveImport(..),
 import HsImpExp
 import HsSyn
 import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, hsc_IC,
-                  setInteractivePrintName, hsc_dflags, msObjFilePath )
+                  setInteractivePrintName, hsc_dflags )
 import Module
 import Name
 import Packages ( trusted, getPackageDetails, getInstalledPackageDetails,
@@ -59,7 +59,7 @@ import Packages ( trusted, getPackageDetails, getInstalledPackageDetails,
 import IfaceSyn ( showToHeader )
 import PprTyThing
 import PrelNames
-import RdrName ( RdrName, getGRE_NameQualifier_maybes, getRdrName )
+import RdrName ( getGRE_NameQualifier_maybes, getRdrName )
 import SrcLoc
 import qualified Lexer
 
@@ -1338,7 +1338,8 @@ infoThing :: GHC.GhcMonad m => Bool -> String -> m SDoc
 infoThing allInfo str = do
     names     <- GHC.parseName str
     mb_stuffs <- mapM (GHC.getInfo allInfo) names
-    let filtered = filterOutChildren (\(t,_f,_ci,_fi) -> t) (catMaybes mb_stuffs)
+    let filtered = filterOutChildren (\(t,_f,_ci,_fi,_sd) -> t)
+                                     (catMaybes mb_stuffs)
     return $ vcat (intersperse (text "") $ map pprInfo filtered)
 
   -- Filter out names whose parent is also there Good
@@ -1353,9 +1354,10 @@ filterOutChildren get_thing xs
                      Just p  -> getName p `elemNameSet` all_names
                      Nothing -> False
 
-pprInfo :: (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst]) -> SDoc
-pprInfo (thing, fixity, cls_insts, fam_insts)
-  =  pprTyThingInContextLoc thing
+pprInfo :: (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst], SDoc) -> SDoc
+pprInfo (thing, fixity, cls_insts, fam_insts, docs)
+  =  docs
+  $$ pprTyThingInContextLoc thing
   $$ show_fixity
   $$ vcat (map GHC.pprInstance cls_insts)
   $$ vcat (map GHC.pprFamInst  fam_insts)
@@ -1401,7 +1403,7 @@ changeDirectory "" = do
      Right dir -> changeDirectory dir
 changeDirectory dir = do
   graph <- GHC.getModuleGraph
-  when (not (null graph)) $
+  when (not (null $ GHC.mgModSummaries graph)) $
         liftIO $ putStrLn "Warning: changing directory causes all loaded modules to be unloaded,\nbecause the search path has changed."
   GHC.setTargets []
   _ <- GHC.load LoadAllTargets
@@ -1461,7 +1463,8 @@ chooseEditFile =
   do let hasFailed x = fmap not $ GHC.isLoaded $ GHC.ms_mod_name x
 
      graph <- GHC.getModuleGraph
-     failed_graph <- filterM hasFailed graph
+     failed_graph <-
+       GHC.mkModuleGraph <$> filterM hasFailed (GHC.mgModSummaries graph)
      let order g  = flattenSCCs $ GHC.topSortModuleGraph True g Nothing
          pick xs  = case xs of
                       x : _ -> GHC.ml_hs_file (GHC.ms_location x)
@@ -1566,7 +1569,7 @@ cmdCmd str = handleSourceError GHC.printException $ do
 
 -- | Generate a typed ghciStepIO expression
 -- @ghciStepIO :: Ty String -> IO String@.
-getGhciStepIO :: GHCi (LHsExpr RdrName)
+getGhciStepIO :: GHCi (LHsExpr GhcPs)
 getGhciStepIO = do
   ghciTyConName <- GHC.getGHCiMonad
   let stringTy = nlHsTyVar stringTy_RDR
@@ -1687,7 +1690,8 @@ doLoadAndCollectInfo retain_context howmuch = do
 
   doLoad retain_context howmuch >>= \case
     Succeeded | doCollectInfo -> do
-      loaded <- getModuleGraph >>= filterM GHC.isLoaded . map GHC.ms_mod_name
+      mod_summaries <- GHC.mgModSummaries <$> getModuleGraph
+      loaded <- filterM GHC.isLoaded $ map GHC.ms_mod_name mod_summaries
       v <- mod_infos <$> getGHCiState
       !newInfos <- collectInfo v loaded
       modifyGHCiState (\st -> st { mod_infos = newInfos })
@@ -1721,7 +1725,7 @@ afterLoad ok retain_context = do
   lift revertCAFs  -- always revert CAFs on load.
   lift discardTickArrays
   loaded_mods <- getLoadedModules
-  modulesLoadedMsg ok loaded_mods
+  modulesLoadedMsg ok (length loaded_mods)
   lift $ setContextAfterLoad retain_context loaded_mods
 
 setContextAfterLoad :: Bool -> [GHC.ModSummary] -> GHCi ()
@@ -1732,8 +1736,9 @@ setContextAfterLoad keep_ctxt ms = do
   targets <- GHC.getTargets
   case [ m | Just m <- map (findTarget ms) targets ] of
         []    ->
-          let graph' = flattenSCCs (GHC.topSortModuleGraph True ms Nothing) in
-          load_this (last graph')
+          let graph = GHC.mkModuleGraph ms
+              graph' = flattenSCCs (GHC.topSortModuleGraph True graph Nothing)
+          in load_this (last graph')
         (m:_) ->
           load_this m
  where
@@ -1796,27 +1801,18 @@ keepPackageImports = filterM is_pkg_import
           mod_name = unLoc (ideclName d)
 
 
-modulesLoadedMsg :: SuccessFlag -> [GHC.ModSummary] -> InputT GHCi ()
-modulesLoadedMsg ok mods = do
+modulesLoadedMsg :: SuccessFlag -> Int -> InputT GHCi ()
+modulesLoadedMsg ok num_mods = do
   dflags <- getDynFlags
   unqual <- GHC.getPrintUnqual
-  let mod_name mod = do
-        is_interpreted <- GHC.isModuleInterpreted mod
-        return $ if is_interpreted
-                  then ppr (GHC.ms_mod mod)
-                  else ppr (GHC.ms_mod mod)
-                       <> text " ("
-                       <> text (normalise $ msObjFilePath mod)
-                       <> text ")" -- fix #9887
-  mod_names <- mapM mod_name mods
-  let mod_commas
-        | null mods = text "none."
-        | otherwise = hsep (punctuate comma mod_names) <> text "."
-      status = case ok of
+  let status = case ok of
                    Failed    -> text "Failed"
                    Succeeded -> text "Ok"
 
-      msg = status <> text ", modules loaded:" <+> mod_commas
+      num_mods_pp = if num_mods == 1
+        then "1 module"
+        else int num_mods <+> "modules"
+      msg = status <> text "," <+> num_mods_pp <+> "loaded."
 
   when (verbosity dflags > 0) $
      liftIO $ putStrLn $ showSDocForUser dflags unqual msg
@@ -2385,7 +2381,7 @@ iiModuleName (IIDecl d)   = unLoc (ideclName d)
 preludeModuleName :: ModuleName
 preludeModuleName = GHC.mkModuleName "Prelude"
 
-sameImpModule :: ImportDecl RdrName -> InteractiveImport -> Bool
+sameImpModule :: ImportDecl GhcPs -> InteractiveImport -> Bool
 sameImpModule _ (IIModule _) = False -- we only care about imports here
 sameImpModule imp (IIDecl d) = unLoc (ideclName d) == unLoc (ideclName imp)
 
@@ -2820,7 +2816,7 @@ showModules = do
 getLoadedModules :: GHC.GhcMonad m => m [GHC.ModSummary]
 getLoadedModules = do
   graph <- GHC.getModuleGraph
-  filterM (GHC.isLoaded . GHC.ms_mod_name) graph
+  filterM (GHC.isLoaded . GHC.ms_mod_name) (GHC.mgModSummaries graph)
 
 showBindings :: GHCi ()
 showBindings = do
@@ -2837,8 +2833,8 @@ showBindings = do
         mb_stuff <- GHC.getInfo False (getName tt)
         return $ maybe (text "") pprTT mb_stuff
 
-    pprTT :: (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst]) -> SDoc
-    pprTT (thing, fixity, _cls_insts, _fam_insts)
+    pprTT :: (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst], SDoc) -> SDoc
+    pprTT (thing, fixity, _cls_insts, _fam_insts, _docs)
       = pprTyThing showToHeader thing
         $$ show_fixity
       where
@@ -3057,7 +3053,7 @@ completeHomeModule = wrapIdentCompleter listHomeModules
 listHomeModules :: String -> GHCi [String]
 listHomeModules w = do
     g <- GHC.getModuleGraph
-    let home_mods = map GHC.ms_mod_name g
+    let home_mods = map GHC.ms_mod_name (GHC.mgModSummaries g)
     dflags <- getDynFlags
     return $ sort $ filter (w `isPrefixOf`)
             $ map (showPpr dflags) home_mods
@@ -3499,10 +3495,10 @@ list2  _other =
 listModuleLine :: Module -> Int -> InputT GHCi ()
 listModuleLine modl line = do
    graph <- GHC.getModuleGraph
-   let this = filter ((== modl) . GHC.ms_mod) graph
+   let this = GHC.mgLookupModule graph modl
    case this of
-     [] -> panic "listModuleLine"
-     summ:_ -> do
+     Nothing -> panic "listModuleLine"
+     Just summ -> do
            let filename = expectJust "listModuleLine" (ml_hs_file (GHC.ms_location summ))
                loc = mkRealSrcLoc (mkFastString (filename)) line 0
            listAround (realSrcLocSpan loc) False

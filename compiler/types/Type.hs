@@ -110,7 +110,7 @@ module Type (
 
         -- (Lifting and boxity)
         isLiftedType_maybe, isUnliftedType, isUnboxedTupleType, isUnboxedSumType,
-        isAlgType, isClosedAlgType, isDataFamilyAppType,
+        isAlgType, isDataFamilyAppType,
         isPrimitiveType, isStrictType,
         isRuntimeRepTy, isRuntimeRepVar, isRuntimeRepKindedTy,
         dropRuntimeRepArgs,
@@ -166,7 +166,7 @@ module Type (
         zapTCvSubst, getTCvInScope, getTCvSubstRangeFVs,
         extendTCvInScope, extendTCvInScopeList, extendTCvInScopeSet,
         extendTCvSubst, extendCvSubst,
-        extendTvSubst, extendTvSubstBinder,
+        extendTvSubst, extendTvSubstBinderAndInScope,
         extendTvSubstList, extendTvSubstAndInScope,
         extendTvSubstWithClone,
         isInScope, composeTCvSubstEnv, composeTCvSubst, zipTyEnv, zipCoEnv,
@@ -182,7 +182,8 @@ module Type (
         cloneTyVarBndr, cloneTyVarBndrs, lookupTyVar,
 
         -- * Pretty-printing
-        pprType, pprParendType, pprTypeApp, pprTyThingCategory, pprShortTyThing,
+        pprType, pprParendType, pprPrecType,
+        pprTypeApp, pprTyThingCategory, pprShortTyThing,
         pprTvBndr, pprTvBndrs, pprForAll, pprUserForAll,
         pprSigmaType, ppSuggestExplicitKinds,
         pprTheta, pprThetaArrowTy, pprClassPred,
@@ -614,8 +615,8 @@ getTyVar_maybe ty | Just ty' <- coreView ty = getTyVar_maybe ty'
                   | otherwise               = repGetTyVar_maybe ty
 
 -- | If the type is a tyvar, possibly under a cast, returns it, along
--- with the coercion. Thus, the co is :: kind tv ~R kind type
-getCastedTyVar_maybe :: Type -> Maybe (TyVar, Coercion)
+-- with the coercion. Thus, the co is :: kind tv ~N kind type
+getCastedTyVar_maybe :: Type -> Maybe (TyVar, CoercionN)
 getCastedTyVar_maybe ty | Just ty' <- coreView ty = getCastedTyVar_maybe ty'
 getCastedTyVar_maybe (CastTy (TyVarTy tv) co)     = Just (tv, co)
 getCastedTyVar_maybe (TyVarTy tv)
@@ -788,7 +789,7 @@ splitAppTys ty = split ty ty []
     split orig_ty _                     args  = (orig_ty, args)
 
 -- | Like 'splitAppTys', but doesn't look through type synonyms
-repSplitAppTys :: Type -> (Type, [Type])
+repSplitAppTys :: HasDebugCallStack => Type -> (Type, [Type])
 repSplitAppTys ty = split ty []
   where
     split (AppTy ty arg) args = split ty (arg:args)
@@ -942,7 +943,7 @@ funArgTy ty | Just ty' <- coreView ty = funArgTy ty'
 funArgTy (FunTy arg _res) = arg
 funArgTy ty               = pprPanic "funArgTy" (ppr ty)
 
-piResultTy :: Type -> Type ->  Type
+piResultTy :: HasDebugCallStack => Type -> Type ->  Type
 piResultTy ty arg = case piResultTy_maybe ty arg of
                       Just res -> res
                       Nothing  -> pprPanic "piResultTy" (ppr ty $$ ppr arg)
@@ -987,7 +988,7 @@ piResultTy_maybe ty arg
 -- so we pay attention to efficiency, especially in the special case
 -- where there are no for-alls so we are just dropping arrows from
 -- a function type/kind.
-piResultTys :: Type -> [Type] -> Type
+piResultTys :: HasDebugCallStack => Type -> [Type] -> Type
 piResultTys ty [] = ty
 piResultTys ty orig_args@(arg:args)
   | Just ty' <- coreView ty
@@ -1029,7 +1030,7 @@ applyTysX :: [TyVar] -> Type -> [Type] -> Type
 -- applyTyxX beta-reduces (/\tvs. body_ty) arg_tys
 -- Assumes that (/\tvs. body_ty) is closed
 applyTysX tvs body_ty arg_tys
-  = ASSERT2( length arg_tys >= n_tvs, pp_stuff )
+  = ASSERT2( arg_tys `lengthAtLeast` n_tvs, pp_stuff )
     ASSERT2( tyCoVarsOfType body_ty `subVarSet` mkVarSet tvs, pp_stuff )
     mkAppTys (substTyWith tvs (take n_tvs arg_tys) body_ty)
              (drop n_tvs arg_tys)
@@ -1093,7 +1094,7 @@ tyConAppArgN :: Int -> Type -> Type
 -- Executing Nth
 tyConAppArgN n ty
   = case tyConAppArgs_maybe ty of
-      Just tys -> ASSERT2( n < length tys, ppr n <+> ppr tys ) tys `getNth` n
+      Just tys -> ASSERT2( tys `lengthExceeds` n, ppr n <+> ppr tys ) tys `getNth` n
       Nothing  -> pprPanic "tyConAppArgN" (ppr n <+> ppr ty)
 
 -- | Attempts to tease a type apart into a type constructor and the application
@@ -1314,8 +1315,12 @@ mkLamType v ty
 
 mkLamTypes vs ty = foldr mkLamType ty vs
 
--- | Given a list of type-level vars and a result type, makes TyBinders, preferring
--- anonymous binders if the variable is, in fact, not dependent.
+-- | Given a list of type-level vars and a result kind,
+-- makes TyBinders, preferring anonymous binders
+-- if the variable is, in fact, not dependent.
+-- e.g.    mkTyConBindersPreferAnon [(k:*),(b:k),(c:k)] (k->k)
+-- We want (k:*) Named, (a;k) Anon, (c:k) Anon
+--
 -- All binders are /visible/.
 mkTyConBindersPreferAnon :: [TyVar] -> Type -> [TyConBinder]
 mkTyConBindersPreferAnon vars inner_ty = fst (go vars)
@@ -1485,14 +1490,6 @@ isTauTy (CoercionTy _)        = False  -- Not sure about this
 %************************************************************************
 -}
 
--- | Make a named binder
-mkTyVarBinder :: ArgFlag -> Var -> TyVarBinder
-mkTyVarBinder vis var = TvBndr var vis
-
--- | Make many named binders
-mkTyVarBinders :: ArgFlag -> [TyVar] -> [TyVarBinder]
-mkTyVarBinders vis = map (mkTyVarBinder vis)
-
 -- | Make an anonymous binder
 mkAnonBinder :: Type -> TyBinder
 mkAnonBinder = Anon
@@ -1586,9 +1583,9 @@ isPredTy ty = go ty []
     go_tc :: TyCon -> [KindOrType] -> Bool
     go_tc tc args
       | tc `hasKey` eqPrimTyConKey || tc `hasKey` eqReprPrimTyConKey
-                  = length args == 4  -- ~# and ~R# sadly have result kind #
-                                      -- not Constraint; but we still want
-                                      -- isPredTy to reply True.
+                  = args `lengthIs` 4  -- ~# and ~R# sadly have result kind #
+                                       -- not Constraint; but we still want
+                                       -- isPredTy to reply True.
       | otherwise = go_k (tyConKind tc) args
 
     go_k :: Kind -> [KindOrType] -> Bool
@@ -1835,7 +1832,7 @@ predTypeEqRel ty
 --
 -- This is a deterministic sorting operation
 -- (that is, doesn't depend on Uniques).
-toposortTyVars :: [TyVar] -> [TyVar]
+toposortTyVars :: [TyCoVar] -> [TyCoVar]
 toposortTyVars tvs = reverse $
                      [ node_payload node | node <- topologicalSortG $
                                           graphFromEdgedVerticesOrd nodes ]
@@ -1889,7 +1886,7 @@ mkFamilyTyConApp :: TyCon -> [Type] -> Type
 mkFamilyTyConApp tc tys
   | Just (fam_tc, fam_tys) <- tyConFamInst_maybe tc
   , let tvs = tyConTyVars tc
-        fam_subst = ASSERT2( length tvs == length tys, ppr tc <+> ppr tys )
+        fam_subst = ASSERT2( tvs `equalLength` tys, ppr tc <+> ppr tys )
                     zipTvSubst tvs tys
   = mkTyConApp fam_tc (substTys fam_subst fam_tys)
   | otherwise
@@ -1959,6 +1956,19 @@ isUnliftedType ty
   = not (isLiftedType_maybe ty `orElse`
          pprPanic "isUnliftedType" (ppr ty <+> dcolon <+> ppr (typeKind ty)))
 
+-- | Is this a type of kind RuntimeRep? (e.g. LiftedRep)
+isRuntimeRepKindedTy :: Type -> Bool
+isRuntimeRepKindedTy = isRuntimeRepTy . typeKind
+
+-- | Drops prefix of RuntimeRep constructors in 'TyConApp's. Useful for e.g.
+-- dropping 'LiftedRep arguments of unboxed tuple TyCon applications:
+--
+--   dropRuntimeRepArgs [ 'LiftedRep, 'IntRep
+--                      , String, Int# ] == [String, Int#]
+--
+dropRuntimeRepArgs :: [Type] -> [Type]
+dropRuntimeRepArgs = dropWhile isRuntimeRepKindedTy
+
 -- | Extract the RuntimeRep classifier of a type. For instance,
 -- @getRuntimeRep_maybe Int = LiftedRep@. Returns 'Nothing' if this is not
 -- possible.
@@ -2021,17 +2031,6 @@ isAlgType ty
       Just (tc, ty_args) -> ASSERT( ty_args `lengthIs` tyConArity tc )
                             isAlgTyCon tc
       _other             -> False
-
--- | See "Type#type_classification" for what an algebraic type is.
--- Should only be applied to /types/, as opposed to e.g. partially
--- saturated type constructors. Closed type constructors are those
--- with a fixed right hand side, as opposed to e.g. associated types
-isClosedAlgType :: Type -> Bool
-isClosedAlgType ty
-  = case splitTyConApp_maybe ty of
-      Just (tc, ty_args) | isAlgTyCon tc && not (isFamilyTyCon tc)
-             -> ASSERT2( ty_args `lengthIs` tyConArity tc, ppr ty ) True
-      _other -> False
 
 -- | Check whether a type is a data family type
 isDataFamilyAppType :: Type -> Bool

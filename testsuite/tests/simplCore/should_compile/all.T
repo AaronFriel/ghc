@@ -113,7 +113,7 @@ test('T5168',
      ['$MAKE -s --no-print-directory T5168'])
 
 test('T5329', normal, compile, [''])
-test('T5303', reqlib('mtl'), compile, [''])   # Coercion-optimiation test
+test('T5303', normal, compile, [''])   # Coercion-optimiation test
 test('T5342', normal, compile, [''])   # Lint error with -prof
 test('T5359a', normal, compile, [''])  # Lint error with -O (OccurAnal)
 test('T5359b', normal, compile, [''])  # Lint error with -O (OccurAnal)
@@ -253,10 +253,20 @@ test('T13338', only_ways(['optasm']), compile, ['-dcore-lint'])
 test('T13367', normal, run_command, ['$MAKE -s --no-print-directory T13367'])
 test('T13417', normal, compile, ['-O'])
 test('T13413', normal, compile, [''])
-test('T13429', normal, compile, [''])
 test('T13410', normal, compile, ['-O2'])
 test('T13468',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T13468'])
 test('T13543', normal, compile, ['-ddump-str-signatures'])
+test('T11272',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T11272'])
+test('T12600',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T12600'])
+test('T13658', normal, compile, ['-dcore-lint'])
+test('T13708', normal, compile, [''])
+test('T14137', normal, compile, ['-dsuppress-uniques -ddump-simpl'])
